@@ -1,0 +1,572 @@
+---
+title: Changes in the Canine Plasma Lipidome after Short- and Long-Term Excess Glucocorticoid Exposure 
+subtitle: Data Analysis for the Manuscript 'Sieber-Ruckstuhl, Burla, et al., 2019'
+author: 
+  - name: Nadja S. Sieber-Ruckstuhl, Bo Burla, Susanne Spoerel, Florence Schmid, Claudio Venzin, Amaury Cazenave-Gassiot, Anne K. Bendt, Federico Torta, Markus R. Wenk, Felicitas S. Boretti
+    affiliation: Vetsuisse Faculty, University of Zurich and Singapore Lipidomics Incubator (SLING), National University of Singapore
+date: February 25, 2019 (B.Burla)
+output:
+  html_document:
+    toc: yes
+  pdf_document: 
+    latex_engine: lualatex
+  word_document: default
+---
+
+```{r Init, message=FALSE, warning=FALSE, include=TRUE}
+###################################################################################################
+# Data processing, statistics and plots for the Manuscript 'Sieber-Ruckstuhl, Burla, et al., 2019'
+#
+# 20.01.2019 / Bo Burla 
+# Singapore Lipidomics Incubator (SLING), National University of Singapore
+###################################################################################################
+
+library(here)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(tibble)
+library(gplots)
+library(RColorBrewer)
+library(ggpubr)
+library(ggplot2)
+library(ggrepel)
+library(cowplot)
+library(factoextra)
+library(ComplexHeatmap)   # Required version V1.99 or higher
+library(circlize)
+library(knitr)
+library(ggsignif)
+library(readr)
+
+source(here("analysis/ms_data_preprocessing.R"))
+source(here("analysis/misc_functions.R"))
+
+```
+## 1) Figures 1 a-l: Clinical plasma markers of lipid metabolism
+```{r Fig1, echo=TRUE, fig.align='center', fig.height=10, fig.width = 4.5, message=FALSE, warning=TRUE}
+data_file <- here("data","raw","Sieber-Ruckstuhl_Burla_2019_RawData-Annot.xlsx") 
+d_clinchem_wide <- read_excel(data_file, sheet = "ClinicalChemistry",
+                              col_names = TRUE,trim_ws = TRUE,na = c("#N/A", "NULL"), col_types = "guess")
+
+#Conver to long format, use only parameter with numerical value 
+d_clinchem <- d_clinchem_wide %>% 
+  select(AnimalID, TreatmentGroup, TreatmentTimePoint, Cortisol, Lipase, TG, Cholesterol, ALAT, ALP) %>% 
+  gather(key = "Parameter", value =  "Value", -AnimalID:-TreatmentTimePoint, factor_key=TRUE,convert = TRUE)
+
+# re-order the levels in the order of appearance in the dataframe otherwise it plots it in alphabetical order
+d_clinchem$TreatmentTimePoint <- factor(d_clinchem$TreatmentTimePoint, levels=c("before","after"))
+d_clinchem$AnimalID <- as.factor(d_clinchem$AnimalID)
+d_clinchem$TreatmentGroup <- as.factor(d_clinchem$TreatmentGroup)
+d_clinchem$Parameter <- as.factor(d_clinchem$Parameter)
+d_clinchem$Value <- as.numeric(d_clinchem$Value)
+
+# Create labels to label points 
+d_clinchem <- d_clinchem %>% mutate(label=ifelse(TreatmentTimePoint=="before", "", as.character(AnimalID)))  
+t.test.log <- function(x,y){t.test(x=log2(x*10),y=log2(y*10),paired = TRUE,var.equal = FALSE)}
+  
+paired_plot <- function(d_filt, var,plotY){
+  d_filt_param <- d_filt %>% filter(Parameter==var)
+  p<- ggplot(d_filt_param, aes(x=TreatmentTimePoint, y=Value, group=AnimalID)) +
+      geom_point(aes(colour=TreatmentTimePoint), size=1.5) +
+      geom_line(size=0.5, alpha=0.5,  linetype="longdash") +
+      xlab('') +
+      scale_colour_manual(values=c("black", "black"), guide=FALSE) +
+      ylab(ifelse(plotY, var, "")) +
+      scale_y_continuous(expand = c(0.1,0.0)) +
+      scale_x_discrete(expand = c(0.1,0.2)) +
+      aes(ymin=0) +
+      geom_text_repel(label=as.character(d_filt_param$label), size=2, nudge_x=.1, nudge_y=0.1) +
+      geom_signif(comparisons  = list(c("before", "after")), 
+                  textsize = 2, test = "t.test.log", map_signif_level = FALSE,margin_top = 0.15) +
+      theme_pubr() +
+      theme(axis.title = element_text(face = "bold"), axis.text.y = element_text(size=10)) +
+      theme(legend.position="none") +
+      theme(strip.background = element_blank(),strip.text.x = element_blank())
+  return(p)
+}
+
+
+# Create list of plots of parameters from one treament group, remove x-axis text from all except last plot
+plt_PRED <- map(.x = c("Cortisol", "Lipase", "TG", "Cholesterol", "ALAT", "ALP"),  
+                .f = function(x) paired_plot(d_clinchem[d_clinchem$TreatmentGroup=="PRED",],x, TRUE))
+plt_PRED[-length(plt_PRED)] <- map(plt_PRED[-length(plt_PRED)], function(x) x + rremove("x.text"))
+
+
+plt_ACTH <- map(.x = c("Cortisol", "Lipase", "TG", "Cholesterol", "ALAT", "ALP"),  
+                .f =function(x) paired_plot(d_clinchem[d_clinchem$TreatmentGroup=="ACTH",],x, FALSE))
+plt_ACTH[-length(plt_ACTH)] <- map(plt_ACTH[-length(plt_ACTH)], function(x) x + rremove("x.text"))
+
+# Create a grid from all plots
+fig1 <- ggarrange(plotlist=c(rbind(plt_PRED,plt_ACTH)), ncol = 2, nrow = 6, align="h")
+ggsave(filename = here("output/figure_1_clinchem.pdf") ,plot = fig1, width = 4, height = 10,units = "in")
+
+plot_grid(plotlist = c(rbind(plt_PRED,plt_ACTH)), align='vh',ncol = 2)
+```
+
+## 2) Load and process MS-based lipidomics data 
+Load raw peak area data, normalize with internal standards, calculate concentrations and perform QC filtering)
+```{r LoadData, echo=TRUE, fig.height=10, fig.width=5, fig.align='center', message=FALSE, warning=TRUE}
+#d_conc_wide <- read_csv(here("data/processed/Ruckstuhl_Burla_2019_BeaglePlasmaLipididomeAfterCS_LipidConc_uM.csv"),  col_names = TRUE, trim_ws =TRUE)
+
+data_annot_file = here("data/raw/Sieber-Ruckstuhl_Burla_2019_RawData-Annot.xlsx") 
+d_conc_wide <- process_ms_dataset(data_annot_file) %>% 
+                arrange((TreatmentGroup),desc(TreatmentTimePoint),  AnimalID)   
+
+write_csv(d_conc_wide, 
+            here("output", "table_S2_LipidConc_uM_Ruckstuhl_Burla_2019.csv"),
+            col_names = TRUE)
+
+d_conc <- d_conc_wide %>% gather(key = Compound, value = Conc, -SampleName:-Sex, factor_key=TRUE) %>%
+          add_lipidclass_names() 
+```
+
+## 3) Figures 2 a/b: Heatmaps and clustering analyses of lipidomes
+```{r Fig2AB, echo=TRUE, fig.show='hold', fig.align='center', fig.height=7, fig.width=5, message=TRUE, warning=TRUE}
+heatmap_plot <- function(d, grp_colors){
+
+    # Prepare data matrix: Remove annotations remove lipid species containing NAs, Inf and zeros
+  d_conc_only <- d %>% select(-SampleName:-Sex) %>% 
+                    select_if(~ !any(is.na(.)) & !any(is.infinite(.)) & !any(.==0)) 
+  
+  # Log-transform, scale and center data
+  m_conc_log <- as.matrix(log2(d_conc_only*100000))
+  m_conc_log_norm = scale(m_conc_log, center = TRUE, scale = TRUE)
+  rownames(m_conc_log_norm) <- paste0(d$AnimalID,d$TreatmentTimePoint)
+  
+  m_conc_log_norm_t <- t(m_conc_log_norm)
+  
+  # cluster samples and compoundss
+  d1 <- dist(m_conc_log_norm,method = "manhattan", diag = TRUE, upper = TRUE)
+  d2 <- dist(m_conc_log_norm_t,method = "maximum", diag = TRUE, upper = FALSE)
+  c1 <- hclust(d1, method = "ward.D", members = NULL)
+  c2 <- hclust(d2, method = "ward.D2", members = NULL)
+  
+  # Create column with color annotations
+  color.map <- ifelse(d$TreatmentTimePoint=="after",grp_colors[1], grp_colors[2])
+  
+  breaks <- seq(-3,3,length=256)
+  # Color gradient
+  my_palette <- rev(colorRampPalette(brewer.pal(10, "RdBu"))(255))
+  
+  # plot heatmap
+  heatmap.2(m_conc_log_norm_t,trace="none",
+        Colv=as.dendrogram(c1),     
+        Rowv=as.dendrogram(c2),
+        scale="row",
+        col = my_palette,
+        ColSideColors=color.map, breaks=breaks,
+        dendrogram = "both", xlab = NULL, ylab = NULL, 
+        margins=c(8,7),cexRow=0.4, cexCol = 1.4, density.info="none",labRow = FALSE, 
+        key = TRUE)
+}
+
+pdf(file = here("output/figure_2ab_clustering.pdf"), width = 5.5, height = 7)
+  heatmap_plot(d_conc_wide %>% filter(TreatmentGroup == "ACTH"), c("#E22D01","#ffeeea"))
+  heatmap_plot(d_conc_wide %>% filter(TreatmentGroup == "PRED"), c("#0F85DC","#c9dfef"))
+dev.off()
+
+heatmap_plot(d_conc_wide %>% filter(TreatmentGroup == "ACTH"), c("#E22D01","#ffeeea"))
+heatmap_plot(d_conc_wide %>% filter(TreatmentGroup == "PRED"), c("#0F85DC","#c9dfef"))
+```
+
+## 4) Figures 2 c/d:  Principal Component Analyses (PCA) of lipidomes
+```{r Fig2CD, echo=TRUE, fig.height=5, fig.width=6, fig.align='center', message=FALSE, warning=TRUE}
+d_conc_pcaplot <- d_conc_wide %>% select(-SampleName:-Sex) %>% 
+                          select_if(~ !any(is.na(.)) & !any(is.infinite(.)) & !any(.==0)) 
+
+# Log2 transform the data
+d_conc_log_pcaplot <- log2(d_conc_pcaplot*100000)
+
+# Perform PCA and plot the results
+res_pca <- prcomp(d_conc_log_pcaplot, center = TRUE, scale. = TRUE)
+
+pca_plot <- function(comp_x, comp_y){
+  fviz_pca_ind(res_pca, 
+    axes = c(comp_x,comp_y),
+    palette=c("#E22D01","#E22D01", "#0F85DC", "#0F85DC"),  
+    habillage=d_conc_wide$ExperimentalGroup,
+    addEllipses=TRUE, 
+    ellipse.level=0.8,
+    ellipse.alpha = 0,
+    ellipse.line.size=1,
+    mean.point = FALSE,
+    pointsize = 6.2,
+    label="none",
+    title = "",
+    axes.linetype = "dotted") +
+  scale_shape_manual(values = c(0, 15, 2,17)) +
+  geom_text_repel(aes(label=as.character(d_conc_wide$AnimalID)), size=4, nudge_x=0.6, nudge_y=0.6)+
+  mytheme
+}
+fig_1C <- pca_plot(comp_x = 1,comp_y = 2)           
+ggsave(filename = here("output/figure_2c_PCA-dim12.pdf"),plot = fig_1C, width = 6.2, height = 5)
+fig_1C
+
+fig_1D <- pca_plot(comp_x = 1, comp_y = 3)
+ggsave(filename = here("output/figure_2d_PCA-dim13.pdf"),plot = fig_1D, width = 6.2, height = 5)
+fig_1D 
+```
+
+## 5) Calculate fold-changes and P values before/after treatment
+Calculate individual and average fold changes before/after treatments, and FDR-adjusted P values from paired t-tests
+```{r ProcessData, echo=TRUE, fig.height=10, fig.width=5, fig.align='center', message=FALSE, warning=TRUE}
+get_FC_stat_summary <- function(d_Conc_local){
+  # Get data frame with fold changes before vs. after treatment for each species/experimental group
+  d_FC <- d_Conc_local %>% 
+  group_by(TreatmentGroup, AnimalID, Sex, lipidClassBase, lipidClass, isPUFA, Compound, add = FALSE)  %>% 
+    summarise(log2FC = log2(Conc[TreatmentTimePoint=="after"]/Conc[TreatmentTimePoint=="before"])) 
+
+  # Obtain P value from paired t-test (incomplete cases are removed, i.e. species with one or more zero or NA)
+  d_FC_stat <- d_Conc_local %>%
+    group_by(Compound, TreatmentGroup) %>% 
+       mutate (log2Conc = log2(Conc)) %>% 
+       filter(sum(is.infinite(log2Conc) | is.na(log2Conc)) == 0) %>%   
+       do(summarise(.,p_value_tLOG = t.test(log2Conc ~ TreatmentTimePoint,
+                                            var.equal=FALSE, paired=TRUE)$p.value))
+  # Calculate FDR-adjusted P values
+  d_FC_stat <- d_FC_stat %>%
+    group_by(TreatmentGroup, add = FALSE) %>%
+     do(mutate(.,fdr_tLOG = p.adjust(p_value_tLOG, "fdr")))
+  
+  # Calculare average fold changes and combine with P values
+  d_FC_summary <- d_FC %>% 
+    group_by(Compound, lipidClass, lipidClassBase, TreatmentGroup) %>%
+      mutate(log2FC = ifelse(is.infinite(log2FC),NA,log2FC)) %>%
+       summarise(meanLog2FC = mean(log2FC, na.rm=TRUE),
+                 sdLog2FC = sd(log2FC, na.rm=TRUE),
+                 meanFC = 2^abs(meanLog2FC)*sign(meanLog2FC)) %>% 
+    left_join(d_FC_stat)
+  return(list("FC" = d_FC, "summary" = d_FC_summary))
+}
+
+# Calculate comparisons for the complete dataset (used in Figures 2 e/f and Figures 3-6)
+fc_summary_all <- get_FC_stat_summary(d_conc)
+
+```
+
+## 6) Figures 2 e/f: PCA of lipid fold changes in all indiviuals
+```{r Fig2EF, echo=TRUE, fig.height=5, fig.width=6, fig.align='center', message=FALSE, warning=TRUE}
+d_FC_wide  <- fc_summary_all$FC %>% ungroup() %>% 
+                select(-lipidClassBase, -lipidClass,-isPUFA) %>% 
+                spread(key = Compound , value = log2FC) %>% 
+                select_if(~ !any(is.na(.)) & !any(is.infinite(.)) & !any(.==0)) 
+
+# Perform PCA and plot the results
+res_pca <- prcomp(d_FC_wide %>% select(-TreatmentGroup:-Sex), center = TRUE, scale. = TRUE)
+
+
+d_FC_wide$TreatmentGroup_shape <- ifelse(d_FC_wide$TreatmentGroup == "ACTH", 15, 17)
+
+pca_plot_FC <- function(comp_x, comp_y, habillage, group_colors){
+              fviz_pca_ind(res_pca, 
+                axes = c(comp_x,comp_y),
+                palette=group_colors,   
+                habillage=factor(as.factor(habillage)),
+                addEllipses=TRUE, 
+                ellipse.level=0.8,
+                ellipse.alpha = 0,
+                ellipse.line.size=1,
+                mean.point = FALSE,
+                pointsize = 6,
+                pointshape = d_FC_wide$TreatmentGroup_shape,
+                pointcolour = d_FC_wide$TreatmentGroup,
+                label="none",
+                title = "",
+                legend = "Groups",
+                axes.linetype = "dotted") +
+              scale_shape_manual(values = c(15, 17)) +
+              geom_text_repel(aes(label=as.character(d_FC_wide$AnimalID)), size=4, nudge_x=0.6, nudge_y=0.6)+
+              mytheme
+            }
+fig_1E <- pca_plot_FC(comp_x = 1, comp_y = 2, 
+                      habillage = d_FC_wide$TreatmentGroup, 
+                      group_colors = c("#E22D01","#0F85DC"))
+
+fig_1F <- pca_plot_FC(comp_x = 3, comp_y = 4,
+                      habillage = d_FC_wide$Sex, 
+                      group_colors = c("#923D97","#0CB1A4"))  
+
+ggsave(filename = here("output/figure_2e_PCA_FC_dim12.pdf"),plot = fig_1E, width = 5.88, height = 5)
+fig_1E
+
+ggsave(filename = here("output/figure_2f_PCA_FC_dim34.pdf"),plot = fig_1F, width = 5.65, height = 5)
+fig_1F
+  
+```
+Warnings are from fviz_pca_ind, with no effect on the data, figure (arises from line 'pointshape = d_FC_wide$TreatmentGroup_shape'). Fill color of points from individuals were changed in Illustrator to colors of experimental groups (see Fig. 2E) 
+
+## 7) Figure 5 b: Total levels of phospholipid species with ≤3 and ≥4 double bonds
+P values from t-tests comparing total levels of PUFA and non-PUFA containg species before and after treatments are shown after the figure.
+```{r Fig5b, echo=TRUE, fig.height=5, fig.width=8, message=FALSE, warning=TRUE}
+# Calculate total levels per lipid class per individual
+# To be able to use function "get_FC_stat_summary" variables Conc/Compound are assigned with the total conc/lipid class
+
+
+plot_nonPUFA_vs_PUFA <- function(d_conc, filename ){
+  d_conc_lipidclass <- d_conc %>% 
+  group_by(TreatmentGroup, AnimalID, Sex, lipidClass, isPUFA, TreatmentTimePoint) %>%
+  summarise(Conc = sum(Conc,na.rm = TRUE), 
+            Compound = paste0(lipidClass[1],ifelse(isPUFA[1], "_PUFA","_noPUFA" )), 
+            lipidClassBase = lipidClassBase[1]) %>% ungroup()
+
+  fc_summary_lipidClasses <- get_FC_stat_summary(d_conc_lipidclass)
+  d_FC_temp <- fc_summary_lipidClasses$FC %>% 
+    filter(lipidClass == "PC" | lipidClass == "PE"| lipidClass == "PI", TreatmentGroup == "ACTH")
+  
+  my_comparisons <- list( c("FALSE.PC", "TRUE.PC"), c("FALSE.PE", "TRUE.PE"), c("FALSE.PI", "TRUE.PI"))
+  
+  fig_5B <- ggplot(d_FC_temp, aes( x=interaction(isPUFA, lipidClass), y = log2FC )) +
+    geom_point(size=3.3,alpha=0.7, aes(shape=isPUFA), color="#142EAF", fill="#142EAF") +
+    geom_line(size=1, aes(group = interaction(AnimalID, lipidClass)),linetype="dotted", color="#BCCDCE") +
+    scale_shape_manual(values=c(16,16)) +
+    scale_fill_manual(values=c("#142EAF", "#142EAF")) +
+    scale_color_manual(values=c("#142EAF", "#142EAF")) +
+    stat_summary(fun.data="plot.mean", geom="errorbar", width=0.5, size=.3, color="red", 
+                 inherit.aes=TRUE,position=position_dodge(0.6)) +
+    geom_hline(yintercept = 0, linetype="dotted", size=1, color = "#919191") + 
+    stat_compare_means(method = "t.test", paired = TRUE, comparisons = my_comparisons, label = "p.format") +
+    xlab("")
+  plot(fig_5B)
+
+  
+  pvalues <- fc_summary_lipidClasses$summary %>% ungroup() %>% 
+    select(-lipidClassBase, -fdr_tLOG) %>% 
+    filter(lipidClass == "PC" | lipidClass == "PE"| lipidClass == "PI", TreatmentGroup == "ACTH")
+  ggsave(filename = here("output", filename), plot = fig_5B, width = 6, height = 3.7)
+  knitr::kable(pvalues)
+}
+
+plot_nonPUFA_vs_PUFA(d_conc, "figure_5b_nonPUFAvsPUFA.pdf")
+
+```
+
+
+## 8) Figures 3/4/5/6: Heatmaps with individual/average fold changes and P / FDR values 
+```{r Fig3456, echo=TRUE, fig.height=7.8, fig.width=4.4, message=FALSE, warning=TRUE, paged.print=FALSE}
+# Each final heatmap consists of 3 fused heatmaps for meanFC, P value and individual FC
+
+# Define color palette and legend for FC 
+FC_palette <- colorRamp2(breaks = c(-2,-1, 0, 1, 2), colors = rev(brewer.pal(5, "RdBu")),space = "RGB")
+fc_lgd = Legend(title = "log2(FC)", col = FC_palette, at = c(-2,-1,0,1,2), 
+                labels = c("-2", "-1", "0" , "1", "2"),legend_height= unit(5, "cm"))
+
+# Define color palette and legend for P values
+pvalue_palette = colorRamp2(breaks = c(0,-log10(0.2), 1,-log10(0.05), 2,-log10(0.002)), 
+                              colors = c("#ededed", "#ededed", "#f2fff3", "#7ff48c", "#07E012", "#017002"),
+                              space = "RGB") 
+pvalue_lgd = Legend(title = "p-value", col = pvalue_palette, 
+                      at = c(-log10(0.2), 1,-log10(0.05), 2,-log10(0.002)), 
+                      labels = c("0.2", "0.1", "0.05", "0.01", "0.002"),legend_height= unit(5, "cm"))
+
+# Function generating the complete heatmap with columns for average FC and P value
+plot_heatmap <- function(fc_summary_object, cmpd_filter, treatment_group_filter, show_row_names){
+  
+  # Constants
+  LOG_FC_MAX_PLOT = 2
+  
+  # Used to set name of ComplexHeatmaps (they cannot contain numbers)
+  cmpd_filter_charonly =  str_extract(cmpd_filter, "([a-zA-Z])+")
+  
+  # Filter dataset for specified lipd class and group and convert to matrix
+  m_IndFC <- fc_summary_object$FC %>% mutate(log2FC = ifelse(is.infinite(log2FC),NA,log2FC)) %>% 
+                        filter(TreatmentGroup==treatment_group_filter, str_detect(Compound, cmpd_filter)) %>% 
+                        ungroup() %>%
+                        select(-Sex, -TreatmentGroup, -lipidClass, -lipidClassBase, -isPUFA) %>% 
+                        spread(key = AnimalID, value = log2FC) %>%
+                        column_to_rownames("Compound") %>%
+                        as.matrix() %>% t()
+  class(m_IndFC) <- "numeric"
+  
+  # Obtain heatmap with individual fold changes 
+  hm_IndvFC = Heatmap(t(m_IndFC), name = paste0("hm_IndvFC", cmpd_filter_charonly, treatment_group_filter),
+              col = FC_palette,
+              width = unit(nrow(m_IndFC) * 2.8 , "mm"),
+              height = unit(ncol(m_IndFC) * 2.6, "mm"),
+              show_row_names = FALSE,
+              show_column_names = TRUE,
+              column_names_rot = 90,
+              column_names_gp = gpar(fontsize = 07, fontface="plain"),
+              cluster_rows = FALSE,cluster_columns = FALSE,
+              show_heatmap_legend = FALSE,
+              rect_gp = gpar(col = "white", lty = 1, lwd = 0.3))
+  
+  # Prepare FC and P value matrix (i.e. truncate FC at +/- 2)  
+  d_sum <- fc_summary_object$summary %>% 
+    mutate(log_p_value = -log10(fdr_tLOG),
+           fdr_tLOG = ifelse(is.na(fdr_tLOG), 1, fdr_tLOG),
+           signif_text = cut(fdr_tLOG, c(0,0.001,0.01, 0.05, 0.1,1), 
+                             labels=c("***","**","*","",""), right=TRUE),
+           FC_text = as.character(ifelse(!is.nan(meanFC), sprintf("%0.1f", round(meanFC, digits = 1)),"")),
+           meanlog2FC_cut = ifelse(abs(meanLog2FC)>LOG_FC_MAX_PLOT, 
+                                   sign(meanLog2FC)*LOG_FC_MAX_PLOT, meanLog2FC)) %>%
+    filter(TreatmentGroup==treatment_group_filter, str_detect(Compound, cmpd_filter)) 
+  
+  # obtain heatmap column with P values
+  m_sum_p <- d_sum  %>% ungroup() %>% select(log_p_value) %>% rename( P = log_p_value)  %>%  as.matrix()
+  rownames(m_sum_p) <- d_sum$Compound
+  hm_pvalue= Heatmap(m_sum_p, name = paste0("hm_pvalue", cmpd_filter_charonly, treatment_group_filter),
+                width = unit(5, "mm"),
+                height = unit(ncol(m_IndFC) * 2.6, "mm"),
+                col=pvalue_palette,  cluster_rows = FALSE,cluster_columns = FALSE,
+                rect_gp = gpar(col = "white", lty = 1, lwd = 0.3),
+                show_row_names = show_row_names,
+                row_names_side = "left",
+                row_names_gp = gpar(fontsize = 7),
+                show_column_names = TRUE,
+                column_names_rot = 90,
+                column_names_gp = gpar(fontsize = 07, fontface="bold.italic"),
+                show_heatmap_legend = FALSE,
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  grid.text(sprintf("%s", d_sum$signif_text[i]), x = x, y = y- unit(c(0.5), "mm"), 
+                            gp = gpar(fontsize = 10))})
+  
+  # obtain heatmap column with average fold changes
+  m_sum_FC <- d_sum  %>% ungroup()%>%  select(meanlog2FC_cut) %>% rowMeans() %>%  as.matrix() 
+  colnames(m_sum_FC) <- c("FC")
+  hm_meanFC = Heatmap(m_sum_FC, name = paste0("hm_meanFC", cmpd_filter_charonly, treatment_group_filter),
+                col = FC_palette,
+                width = unit(5, "mm"),
+                height = unit(ncol(m_IndFC) * 2.6, "mm"),
+                cluster_rows = FALSE,cluster_columns = FALSE,
+                rect_gp = gpar(col = "white", lty = 1, lwd = 0.3),
+                show_row_names = FALSE,
+                show_column_names = TRUE,
+                column_names_rot = 90,
+                column_names_gp = gpar(fontsize = 07, fontface="bold"),
+                show_heatmap_legend = FALSE,
+                cell_fun = function(j, i, x, y, width, height, fill) {
+                  grid.text(sprintf("%s", d_sum$FC_text[i]), x, y, gp = gpar(fontsize = 5))})
+  
+  # combine heatmaps 
+  a <- draw(hm_pvalue + hm_meanFC + hm_IndvFC, gap = unit(c(0, 0.02), "cm"),  
+            show_heatmap_legend = FALSE,
+            newpage = FALSE)
+  
+  # draw borders around heatmap segments
+  add_borders <- function(heatmap_name, borders_x, borders_y, line_width){
+    decorate_heatmap_body(paste0(heatmap_name, cmpd_filter_charonly, treatment_group_filter), 
+                          {grid.lines(borders_x, borders_y, gp = gpar(col = "#787878", lwd = line_width))})
+  }
+  
+  add_borders("hm_IndvFC", c(0, 0), c(0,1),1.2)
+  add_borders("hm_IndvFC", c(1, 1), c(0,1),1.2)
+  add_borders("hm_IndvFC", c(0, 1), c(1,1),1.2)
+  add_borders("hm_IndvFC", c(0, 1), c(0,0),1.2)
+  add_borders("hm_pvalue", c(0, 1), c(1,1),1.2)
+  add_borders("hm_pvalue", c(0, 1), c(0,0),1.2)
+  add_borders("hm_pvalue", c(0, 0), c(0,1),1.2)
+  add_borders("hm_meanFC", c(0, 1), c(1,1),1.2)
+  add_borders("hm_meanFC", c(0, 1), c(0,0),1.2)
+  add_borders("hm_meanFC", c(1, 1), c(0,1),1.2)
+  draw(a)
+  return(a)
+}
+
+
+# combine heatmaps for both experimental groups
+plot_FC_heatmap_figure <- function(fc_summary_object, lipidclasses){
+  i = 1
+  plt_acth <- list()
+  plt_pred <- list()
+  for(lipidclass in lipidclasses){
+    plt_pred[[i]] <- grid.grabExpr(plot_heatmap(fc_summary_object, lipidclass,"PRED", show_row_names = TRUE))
+    plt_acth[[i]] <- grid.grabExpr(plot_heatmap(fc_summary_object, lipidclass,"ACTH", show_row_names = FALSE))
+    i = i + 1
+  }
+  plot_grid(plotlist = c(rbind(plt_pred,plt_acth)), align='vh',axis = "r",ncol = 2)
+}
+ 
+# draw heatmaps for different lipid classes
+pdf(file = here("output/figure_3-6_heatmaps.pdf"), width = 5 , height = 9)
+  plot_FC_heatmap_figure(fc_summary_all, c("^Cer","Hex1Cer", "Hex2Cer", "^GM3"))
+  plot_FC_heatmap_figure(fc_summary_all, c("SM", "S1P"))
+  plot_FC_heatmap_figure(fc_summary_all, c("^LPC O","^PC O", "PC P", "^PE O","^PE P"))
+  plot_FC_heatmap_figure(fc_summary_all, c("^LPC [0-9]+","^PC [0-9]+"))
+  plot_FC_heatmap_figure(fc_summary_all, c("^LPE [0-9]+","^PE [0-9]+","^PI", "^PS"))
+  plot_FC_heatmap_figure(fc_summary_all, c("DG ","TG ", "CE "))
+  plot.new()
+  draw(pvalue_lgd)
+  plot.new()
+  draw(fc_lgd)
+dev.off()
+  
+```
+
+## 9) Supplementary Table S3: Fold changes and p/FDR values
+```{r tableS3, echo=TRUE, fig.height=10, fig.width=5, fig.align='center', message=FALSE, warning=TRUE}
+
+get_table_FC_stats <- function(fc_summary_object, filter_exp_group, filter_lipid_class){
+  
+  tbl <- fc_summary_object$FC %>% filter(TreatmentGroup==filter_exp_group, str_detect(Compound, filter_lipid_class)) %>% 
+            ungroup() %>% 
+                  dplyr::select(Compound, TreatmentGroup,AnimalID,log2FC) %>% 
+                  spread(key = AnimalID, value = log2FC) %>% 
+                  left_join(fc_summary_object$summary %>% 
+                              filter(TreatmentGroup==filter_exp_group, str_detect(Compound, filter_lipid_class)),
+                            by = c("Compound","TreatmentGroup")) %>% 
+            select(-lipidClass,-lipidClassBase) 
+  
+}
+
+d_FC_report_Pred <- get_table_FC_stats(fc_summary_all, "PRED", "") 
+d_FC_report_ACTH <- get_table_FC_stats(fc_summary_all, "ACTH", "") 
+d_FC_report <- d_FC_report_Pred %>% left_join(d_FC_report_ACTH, by=(c("Compound"))) 
+
+write_csv(d_FC_report, path =  here("output/table_S3_summary_FC_Pvalues_allsamples.csv"))
+
+```
+
+## 10) Supplementary Tables S5/S6/S7: Excluding specific dogs 
+```{r tableS567, echo=TRUE, fig.height=10, fig.width=5, fig.align='center', message=FALSE, warning=TRUE}
+
+
+fc_summary_noT4 <- get_FC_stat_summary(d_conc %>% filter(AnimalID !="T4"))
+fc_summary_noT6 <- get_FC_stat_summary(d_conc %>% filter(AnimalID !="T6"))
+fc_summary_noP3 <- get_FC_stat_summary(d_conc %>% filter(AnimalID !="P3"))
+
+t_summary_noT4 <- get_table_FC_stats(fc_summary_noT4,"ACTH", "Cer")
+t_summary_noT6 <- get_table_FC_stats(fc_summary_noT6,"ACTH", "PE [0-9]+")
+t_summary_noP3 <- get_table_FC_stats(fc_summary_noP3,"PRED", "^DG|^TG")
+
+write_csv(t_summary_noT4, path = here("output/table_S5_summary_noT4_Cer.csv"))
+write_csv(t_summary_noT6, path = here("output/table_S6_summary_noT6_LPE-PE.csv"))
+write_csv(t_summary_noP3, path = here("output/table_S7_summary_noP3_DG-TG.csv"))
+
+knitr::kable(t_summary_noT4 %>% select(-T1:-T6) ,digits = 3, caption = "no T4")
+knitr::kable(t_summary_noT6 %>% select(-T1:-T5) ,digits = 3, caption = "no T6")
+knitr::kable(t_summary_noP3 %>% select(-P1:-P8),digits = 3, caption = "no P3")
+
+
+```
+
+## 11) Supplementary Figures S4 a/b/d: Average FC and p values with/without specific individuals
+Comparison of fold changes and p values for all individuals and when specific
+dogs were excluded from the analysis.
+```{r FigS4abd, echo=TRUE, fig.height=7.8, fig.width=4.4, message=FALSE, warning=TRUE, paged.print=FALSE}
+pdf(file = here("output/figure_S4abd_heatmaps.pdf"), width = 5 , height = 9)
+  plot_FC_heatmap_figure(get_FC_stat_summary(d_conc %>% filter(AnimalID !="T4")), c("^Cer "))
+  plot_FC_heatmap_figure(get_FC_stat_summary(d_conc %>% filter(AnimalID !="T6")), c("^LPE ","^PE [0-9]+"))
+  plot_FC_heatmap_figure(get_FC_stat_summary(d_conc %>% filter(AnimalID !="P3")), c("^DG ","^TG "))
+dev.off()
+```
+
+## 12) Supplementary Figure S4c: Effect of removing T6 on total levels of phospholipid species with ≤3 and ≥4 double bonds  
+P values from t-tests comparing total levels of PUFA and non-PUFA containg species before and after treatments are shown after the figure.
+```{r FigS4c, echo=TRUE, fig.height=5, fig.width=8, message=FALSE, warning=TRUE}
+plot_nonPUFA_vs_PUFA(d_conc %>% filter(AnimalID != "T6"), "figure_S4c_nonPUFAvsPUFA.pdf")
+```
+
+## Source code of "ms_data_preprocessing.R" used in this R notebook
+```{r preprocessMS_Rcode, echo=TRUE, message=FALSE, warning=TRUE, cache=TRUE, code = readLines("ms_data_preprocessing.R")}
+```
+
+## Source code of "misc_functions.R" used in this R notebook
+```{r miscfunctions_Rcode, echo=TRUE, message=FALSE, warning=TRUE, cache=TRUE, code = readLines("misc_functions.R")}
+```
+
+## SessionInfo at time of knitting this R notebook
+```{r sessioninfo, echo=TRUE, message=FALSE, warning=TRUE, cache=FALSE}
+sessionInfo()
+```
