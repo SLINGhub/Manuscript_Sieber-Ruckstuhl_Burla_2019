@@ -1,4 +1,7 @@
 # Data Analysis for the Manuscript *'Changes in the Canine Plasma Lipidome after Short- and Long-Term Excess Glucocorticoid Exposure'*
+
+Published in: *Scientific Reports* **9**, Article number: 6015 (2019)  [doi: 10.1038/s41598-019-42190-1](https://doi.org/10.1038/s41598-019-42190-1)
+
 Authors: *Nadja S. Sieber-Ruckstuhl, Bo Burla, Susanne Spoerel, Florence Schmid, Claudio Venzin, Amaury Cazenave-Gassiot, Anne K. Bendt, Federico Torta, Markus R. Wenk, Felicitas S. Boretti* (Affiliations: *University of Zurich, Switzerland, and National University of Singapore*)
 
 This repository containes the R scripts used to process the lipidomics raw data, to perform the statistical analyses and to generate all figures and tables of the manuscript. The code for the statistical analyses and figures is provided as a R Notebook with a packrat libary to faciliate reprodubility of the data analysis. The original version of the codes and GitHub repository  used for the publication have also been archived to Zenodo [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.2581113.svg)](https://doi.org/10.5281/zenodo.2581113)
